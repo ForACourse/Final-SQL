@@ -1,0 +1,168 @@
+-- Список клиентов с непрерывной историей за год + метрики
+WITH parsed_tx AS (
+    SELECT 
+        Id_check,
+        ID_client,
+        Sum_payment,
+        STR_TO_DATE(date_new, '%d/%m/%Y') AS tx_date
+    FROM transactions_info
+),
+monthly_activity AS (
+    SELECT 
+        ID_client,
+        DATE_FORMAT(tx_date, '%Y-%m-01') AS tx_month
+    FROM parsed_tx
+    WHERE tx_date >= '2015-06-01' AND tx_date < '2016-06-01'
+    GROUP BY ID_client, DATE_FORMAT(tx_date, '%Y-%m-01')
+),
+continuous_clients AS (
+    SELECT ID_client
+    FROM monthly_activity
+    GROUP BY ID_client
+    HAVING COUNT(DISTINCT tx_month) = 12
+)
+SELECT 
+    p.ID_client,
+    ROUND(AVG(p.Sum_payment), 2) AS avg_check_amount,
+    ROUND(SUM(p.Sum_payment) / 12.0, 2) AS avg_monthly_spend,
+    COUNT(DISTINCT p.Id_check) AS total_operations_count
+FROM parsed_tx p
+JOIN continuous_clients cc ON p.ID_client = cc.ID_client
+WHERE p.tx_date >= '2015-06-01' AND p.tx_date < '2016-06-01'
+GROUP BY p.ID_client
+ORDER BY avg_monthly_spend DESC;
+
+-- Помесячная аналитика за период
+WITH parsed_tx AS (
+    SELECT 
+        Id_check,
+        ID_client,
+        Sum_payment,
+        STR_TO_DATE(date_new, '%d/%m/%Y') AS tx_date
+    FROM transactions_info
+    WHERE STR_TO_DATE(date_new, '%d/%m/%Y') >= '2015-06-01' 
+      AND STR_TO_DATE(date_new, '%d/%m/%Y') < '2016-06-01'
+),
+yearly_totals AS (
+    SELECT 
+        COUNT(DISTINCT Id_check) AS total_year_checks,
+        SUM(Sum_payment) AS total_year_payment
+    FROM parsed_tx
+),
+monthly_metrics AS (
+    SELECT 
+        DATE_FORMAT(tx_date, '%Y-%m-01') AS tx_month,
+        COUNT(DISTINCT Id_check) AS month_checks,
+        SUM(Sum_payment) AS month_payment,
+        COUNT(DISTINCT ID_client) AS active_clients,
+        AVG(Sum_payment) AS avg_check_in_month
+    FROM parsed_tx
+    GROUP BY DATE_FORMAT(tx_date, '%Y-%m-01')
+)
+SELECT 
+    m.tx_month,
+    ROUND(m.avg_check_in_month, 2) AS avg_check_amount,
+    ROUND(m.month_checks * 1.0 / m.active_clients, 2) AS avg_operations_per_client,
+    m.active_clients AS active_clients_count,
+    ROUND(m.month_checks * 100.0 / y.total_year_checks, 2) AS share_of_annual_operations_pct,
+    ROUND(m.month_payment * 100.0 / y.total_year_payment, 2) AS share_of_annual_revenue_pct
+FROM monthly_metrics m
+CROSS JOIN yearly_totals y
+ORDER BY m.tx_month;
+
+-- Соотношение M/F/NA по месяцам
+WITH parsed_tx AS (
+    SELECT 
+        Id_check,
+        ID_client,
+        Sum_payment,
+        STR_TO_DATE(date_new, '%d/%m/%Y') AS tx_date
+    FROM transactions_info
+    WHERE STR_TO_DATE(date_new, '%d/%m/%Y') >= '2015-06-01' 
+      AND STR_TO_DATE(date_new, '%d/%m/%Y') < '2016-06-01'
+)
+SELECT 
+    DATE_FORMAT(p.tx_date, '%Y-%m-01') AS tx_month,
+    
+    -- % соотношение клиентов
+    ROUND(COUNT(DISTINCT CASE WHEN LOWER(c.Gender) = 'm' THEN p.ID_client END) * 100.0 / COUNT(DISTINCT p.ID_client), 2) AS pct_clients_male,
+    ROUND(COUNT(DISTINCT CASE WHEN LOWER(c.Gender) = 'f' THEN p.ID_client END) * 100.0 / COUNT(DISTINCT p.ID_client), 2) AS pct_clients_female,
+    ROUND(COUNT(DISTINCT CASE WHEN c.Gender IS NULL OR LOWER(c.Gender) NOT IN ('m', 'f') THEN p.ID_client END) * 100.0 / COUNT(DISTINCT p.ID_client), 2) AS pct_clients_na,
+    
+    -- Доля затрат
+    ROUND(SUM(CASE WHEN LOWER(c.Gender) = 'm' THEN p.Sum_payment ELSE 0 END) * 100.0 / SUM(p.Sum_payment), 2) AS pct_spend_male,
+    ROUND(SUM(CASE WHEN LOWER(c.Gender) = 'f' THEN p.Sum_payment ELSE 0 END) * 100.0 / SUM(p.Sum_payment), 2) AS pct_spend_female,
+    ROUND(SUM(CASE WHEN c.Gender IS NULL OR LOWER(c.Gender) NOT IN ('m', 'f') THEN p.Sum_payment ELSE 0 END) * 100.0 / SUM(p.Sum_payment), 2) AS pct_spend_na
+FROM parsed_tx p
+LEFT JOIN customer_info c ON p.ID_client = c.Id_client
+GROUP BY DATE_FORMAT(p.tx_date, '%Y-%m-01')
+ORDER BY tx_month;
+
+-- Возрастные группы и поквартальный анализ
+WITH parsed_tx AS (
+    SELECT 
+        t.Id_check,
+        t.ID_client,
+        t.Sum_payment,
+        STR_TO_DATE(t.date_new, '%d/%m/%Y') AS tx_date
+    FROM transactions_info t
+    WHERE STR_TO_DATE(t.date_new, '%d/%m/%Y') >= '2015-06-01' 
+      AND STR_TO_DATE(t.date_new, '%d/%m/%Y') < '2016-06-01'
+),
+aged_transactions AS (
+    SELECT 
+        p.Id_check,
+        p.ID_client,
+        p.Sum_payment,
+        CONCAT(YEAR(p.tx_date), '-Q', QUARTER(p.tx_date)) AS tx_quarter,
+        CASE 
+            WHEN c.Age IS NULL THEN 'No_Age_Info'
+            ELSE CONCAT(FLOOR(c.Age / 10) * 10, '-', FLOOR(c.Age / 10) * 10 + 9)
+        END AS age_group
+    FROM parsed_tx p
+    LEFT JOIN customer_info c ON p.ID_client = c.Id_client
+),
+overall_totals AS (
+    SELECT 
+        SUM(Sum_payment) AS total_spend_all,
+        COUNT(DISTINCT Id_check) AS total_ops_all
+    FROM aged_transactions
+),
+age_summary AS (
+    SELECT 
+        age_group,
+        SUM(Sum_payment) AS total_spend,
+        COUNT(DISTINCT Id_check) AS total_operations
+    FROM aged_transactions
+    GROUP BY age_group
+),
+quarterly_age_summary AS (
+    SELECT 
+        age_group,
+        AVG(quarter_spend) AS avg_quarter_spend,
+        AVG(quarter_ops) AS avg_quarter_ops
+    FROM (
+        SELECT 
+            age_group,
+            tx_quarter,
+            SUM(Sum_payment) AS quarter_spend,
+            COUNT(DISTINCT Id_check) AS quarter_ops
+        FROM aged_transactions
+        GROUP BY age_group, tx_quarter
+    ) q
+    GROUP BY age_group
+)
+SELECT 
+    s.age_group,
+    s.total_spend AS total_period_spend,
+    s.total_operations AS total_period_operations,
+    ROUND(s.total_spend * 100.0 / o.total_spend_all, 2) AS period_spend_pct,
+    ROUND(s.total_operations * 100.0 / o.total_ops_all, 2) AS period_ops_pct,
+    ROUND(q.avg_quarter_spend, 2) AS avg_quarterly_spend,
+    ROUND(q.avg_quarter_ops, 2) AS avg_quarterly_operations
+FROM age_summary s
+JOIN quarterly_age_summary q ON s.age_group = q.age_group
+CROSS JOIN overall_totals o
+ORDER BY 
+    CASE WHEN s.age_group = 'No_Age_Info' THEN 1 ELSE 0 END,
+    s.age_group;
